@@ -26,10 +26,13 @@
 
 (call-with-ci-muffles
  (lambda ()
-   (dolist (n '("rove" "tomlet" "cl-ppcre"))
+   (dolist (n '("rove" "cl-ppcre"))
      (unless (asdf:find-system n nil)
        (format t "~&; ci: ql fallback ~a~%" n)
        (ql:quickload n :silent t)))
+   (unless (asdf:find-system "tomlet" nil)
+     (format t "~&; ci: ensure tomlet from GHCR~%")
+     (cl-repo:ensure-systems '("tomlet")))
    (asdf:load-system "cl-stack-config")
    (asdf:test-system "cl-stack-config")))
 

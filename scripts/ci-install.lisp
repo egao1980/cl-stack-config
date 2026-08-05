@@ -24,10 +24,10 @@
 
 (call-with-ci-muffles
  (lambda ()
+   ;; tomlet is GHCR-only (not on Quicklisp yet).
    (cl-repo:ensure-system-dependencies "cl-stack-config"
      :also-tests t
-     :sources '(("tomlet" :ql)
-                ("cl-ppcre" :ql)
+     :sources '(("cl-ppcre" :ql)
                 ("rove" :ql)))))
 
 (format t "~&; ci: install phase done~%")
