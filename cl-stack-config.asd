@@ -4,7 +4,7 @@
   :author "egao1980"
   :license "MIT"
   :depends-on ("tomlet" "uiop")
-  :properties (:cl-repo (:ci (:sources (("cl-ppcre" :ql) ("rove" :ql)))))
+
   :serial t
   :pathname "src"
   :components ((:file "package")
