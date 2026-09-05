@@ -4,7 +4,7 @@ Env + **TOML** config facade for [cl-stack](https://github.com/egao1980/cl-stack
 
 | Piece | Choice |
 |-------|--------|
-| File format | TOML via [`tomlet`](https://github.com/fukamachi/tomlet) |
+| File format | TOML via [`toml-protocol`](https://github.com/egao1980/toml-protocol) / `toml-backend-tomlet` |
 | Precedence | file < env < explicit overrides |
 | Env nesting | `APP_DATABASE__HOST` → `database.host` |
 

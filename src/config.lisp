@@ -161,7 +161,7 @@
                   (error 'config-file-error
                          :message (format nil "missing file ~a" path)
                          :path (namestring path)))
-                (%copy-tree (tomlet:parse-file path)))
+                (%copy-tree (toml-protocol:decode path)))
             (config-error (e) (error e))
             (error (e)
               (error 'config-parse-error
