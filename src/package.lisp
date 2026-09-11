@@ -14,6 +14,8 @@
            #:config-p
            #:config-data
            #:config-prefix
+           #:config-format
+           #:parse-ini
            #:load
            #:load-config
            #:reload
