@@ -12,7 +12,8 @@
   (data (make-hash-table :test #'equal) :type hash-table)
   (source nil)
   (prefix nil)
-  (env-p t))
+  (env-p t)
+  (format :toml))
 
 (defun %path-list (path)
   (cond
@@ -148,12 +149,66 @@
     (t (error 'config-type-error
               :message (format nil "bad overrides ~s" overrides)))))
 
-(defun load-config (source &key (prefix "APP") (env t) overrides environ)
-  "Parse TOML SOURCE (pathname/string) → CONFIG.
+(defun %detect-format (path format)
+  (ecase format
+    ((:toml :ini) format)
+    (:auto
+     (let ((type (string-downcase (or (pathname-type path) ""))))
+       (if (member type '("ini" "cfg" "conf") :test #'string=)
+           :ini
+           :toml)))))
+
+(defun %parse-ini-value (raw)
+  (let ((s (string-trim '(#\Space #\Tab) raw)))
+    (if (and (>= (length s) 2)
+             (or (and (char= (char s 0) #\") (char= (char s (1- (length s))) #\"))
+                 (and (char= (char s 0) #\') (char= (char s (1- (length s))) #\'))))
+        (subseq s 1 (1- (length s)))
+        s)))
+
+(defun parse-ini (text &optional path)
+  "Parse INI TEXT → nested equal hash-table. No interpolation.
+   [section] keys nest; keys before the first section stay at the root."
+  (let* ((root (make-hash-table :test #'equal))
+         (current root)
+         (line-no 0))
+    (labels ((fail (msg)
+               (error 'config-parse-error
+                      :message (format nil "~a (line ~d)" msg line-no)
+                      :path path)))
+      (loop for line in (uiop:split-string text :separator '(#\Newline))
+            do (incf line-no)
+               (let* ((cut (or (position #\# line) (position #\; line)))
+                      (s (string-trim '(#\Space #\Tab #\Return)
+                                      (if cut (subseq line 0 cut) line))))
+                 (cond
+                   ((zerop (length s)))
+                   ((and (char= (char s 0) #\[)
+                         (char= (char s (1- (length s))) #\]))
+                    (let ((name (string-trim '(#\Space #\Tab)
+                                             (subseq s 1 (1- (length s))))))
+                      (when (zerop (length name))
+                        (fail "empty section name"))
+                      (setf current (%ensure-table root name))))
+                   (t
+                    (let ((eq-pos (or (position #\= s) (position #\: s))))
+                      (unless eq-pos
+                        (fail (format nil "expected key=value: ~s" s)))
+                      (let ((key (string-trim '(#\Space #\Tab) (subseq s 0 eq-pos)))
+                            (val (%parse-ini-value (subseq s (1+ eq-pos)))))
+                        (when (zerop (length key))
+                          (fail "empty key"))
+                        (setf (gethash key current) val))))))))
+    root))
+
+(defun load-config (source &key (prefix "APP") (env t) overrides environ (format :auto))
+  "Parse SOURCE (pathname/string) → CONFIG.
+   FORMAT is :toml, :ini, or :auto (.ini/.cfg/.conf → ini, else toml).
    Precedence: file < env (when ENV) < OVERRIDES.
    ENVIRON — optional (NAME . VALUE) alist (required for env overlay off SBCL)."
   (let* ((path (uiop:ensure-pathname source :want-file t
                                      :defaults *default-pathname-defaults*))
+         (fmt (%detect-format path format))
          (tree
           (handler-case
               (progn
@@ -161,7 +216,10 @@
                   (error 'config-file-error
                          :message (format nil "missing file ~a" path)
                          :path (namestring path)))
-                (%copy-tree (toml-protocol:decode path)))
+                (%copy-tree
+                 (ecase fmt
+                   (:toml (toml-protocol:decode path))
+                   (:ini (parse-ini (uiop:read-file-string path) (namestring path))))))
             (config-error (e) (error e))
             (error (e)
               (error 'config-parse-error
@@ -170,7 +228,7 @@
     (when env
       (%apply-env tree prefix environ))
     (%apply-overrides tree overrides)
-    (%make-config :data tree :source path :prefix prefix :env-p env)))
+    (%make-config :data tree :source path :prefix prefix :env-p env :format fmt)))
 
 (defun load (source &rest keys &key &allow-other-keys)
   "Alias for LOAD-CONFIG (shadows CL:LOAD in this package)."
@@ -181,7 +239,8 @@
   (load-config (config-source cfg)
                :prefix (config-prefix cfg)
                :env env
-               :overrides overrides))
+               :overrides overrides
+               :format (config-format cfg)))
 
 (defmacro with-config ((cfg) &body body)
   `(let ((*config* ,cfg))

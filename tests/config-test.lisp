@@ -51,3 +51,44 @@ port = 1
          (c (cfg:load-config path :env nil)))
     (cfg:with-config (c)
       (ok (= 1 (cfg:get nil "x"))))))
+
+(defun %write-tmp-ini (text)
+  (uiop:with-temporary-file (:pathname path :prefix "cl-stack-config-" :type "ini"
+                             :keep t)
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string text out))
+    path))
+
+(deftest load-ini-and-get
+  (let* ((path (%write-tmp-ini "
+# comment
+debug = true
+
+[database]
+host = localhost
+port = 5432
+name = \"app db\"
+"))
+         (c (cfg:load-config path :env nil)))
+    (ok (eq :ini (cfg:config-format c)))
+    (ok (eq t (cfg:get-boolean c "debug")))
+    (ok (string= "localhost" (cfg:get c "database.host")))
+    (ok (= 5432 (cfg:get-integer c "database.port")))
+    (ok (string= "app db" (cfg:get-string c "database.name")))))
+
+(deftest load-ini-explicit-format
+  (let* ((path (%write-tmp-toml "
+[server]
+port = 9
+"))
+         (c (cfg:load-config path :env nil :format :ini)))
+    (ok (= 9 (cfg:get-integer c "server.port")))))
+
+(deftest ini-env-overlay
+  (let* ((path (%write-tmp-ini "
+[database]
+host = file-host
+"))
+         (c (cfg:load-config path :prefix "APP" :env t
+                             :environ '(("APP_DATABASE__HOST" . "env-host")))))
+    (ok (string= "env-host" (cfg:get c "database.host")))))

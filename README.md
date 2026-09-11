@@ -1,10 +1,10 @@
 # cl-stack-config
 
-Env + **TOML** config facade for [cl-stack](https://github.com/egao1980/cl-stack).
+Env + **TOML** / **INI** config facade for [cl-stack](https://github.com/egao1980/cl-stack).
 
 | Piece | Choice |
 |-------|--------|
-| File format | TOML via [`toml-protocol`](https://github.com/egao1980/toml-protocol) / `toml-backend-tomlet` |
+| File format | TOML via [`toml-protocol`](https://github.com/egao1980/toml-protocol) / `toml-backend-tomlet`; INI via `parse-ini` (`:format :ini` / `:auto`) |
 | Precedence | file < env < explicit overrides |
 | Env nesting | `APP_DATABASE__HOST` → `database.host` |
 

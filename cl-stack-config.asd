@@ -1,6 +1,6 @@
 (defsystem "cl-stack-config"
-  :version "0.1.1"
-  :description "env + TOML config facade for cl-stack (toml-protocol)"
+  :version "0.2.0"
+  :description "env + TOML/INI config facade for cl-stack (toml-protocol)"
   :author "egao1980"
   :license "MIT"
   :depends-on ("toml-protocol" "toml-backend-tomlet" "uiop")
