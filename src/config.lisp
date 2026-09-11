@@ -169,9 +169,9 @@
 (defun parse-ini (text &optional path)
   "Parse INI TEXT → nested equal hash-table. No interpolation.
    [section] keys nest; keys before the first section stay at the root."
-  (let ((root (make-hash-table :test #'equal))
-        (current root)
-        (line-no 0))
+  (let* ((root (make-hash-table :test #'equal))
+         (current root)
+         (line-no 0))
     (labels ((fail (msg)
                (error 'config-parse-error
                       :message (format nil "~a (line ~d)" msg line-no)
