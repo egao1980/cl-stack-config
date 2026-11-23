@@ -100,6 +100,9 @@ PYCL_FROM_ENV=${PYCL_OUTER}
     (uiop:delete-file-if-exists toml)
     (uiop:delete-file-if-exists dotenv)))
 
+;;; Edge cases. Expected values are python-dotenv 1.1.1's dotenv_values /
+;;; load_dotenv output on the same text, except the rows marked "differs".
+
 (defun %write-utf8 (text type)
   "Like %WRITE-TMP, in UTF-8 whatever the locale."
   (uiop:with-temporary-file (:pathname path :prefix "cl-stack-config-" :type type
