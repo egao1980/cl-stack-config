@@ -17,7 +17,8 @@
   :pathname "tests"
   :serial t
   :components ((:file "package")
-               (:file "config-test"))
+               (:file "config-test")
+               (:file "dotenv-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
