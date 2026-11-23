@@ -7,6 +7,10 @@
            #:config-missing-error
            #:config-type-error
            #:config-file-error
+           #:config-validation-error
+           #:dotenv-syntax-warning
+           #:dotenv-syntax-warning-path
+           #:dotenv-syntax-warning-line
            #:config-error-message
            #:config-error-path
            #:*config*
@@ -16,6 +20,11 @@
            #:config-prefix
            #:config-format
            #:parse-ini
+           #:parse-dotenv
+           #:read-dotenv
+           #:load-dotenv
+           #:config-dotenv
+           #:load-into
            #:load
            #:load-config
            #:reload
