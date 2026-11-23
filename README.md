@@ -44,7 +44,7 @@ APP_FLAG                             # no "=": parsed with value NIL, never set
 
 - `${NAME}` and `${NAME:-default}` expand in unquoted and double-quoted values; `$NAME` does not. A missing name gives the default, else `""`. `parse-dotenv` (like `dotenv_values`) looks names up in the file first, then the environment (`:environ` alist, default the process). `load-dotenv` without `:override` and the `load-config` layer look in the environment first (like `load_dotenv`). `:expand nil` turns expansion off.
 - A repeated name keeps its first position and its last value.
-- `load-dotenv` keeps variables that are already set (even to `""`) unless `:override t`. It returns the `(name . value)` pairs it set.
+- `load-dotenv` keeps variables that are already set (on POSIX even to `""`; Windows has no empty variables) unless `:override t`. It returns the `(name . value)` pairs it set.
 - A statement that does not parse signals `dotenv-syntax-warning` (with `dotenv-syntax-warning-line`) and is skipped, as python-dotenv logs and skips. `muffle-warning` silences it; a handler can turn it into an error.
 - A missing file signals `config-file-error` with a `continue` restart that skips it. `load-dotenv` / `read-dotenv` take `:if-does-not-exist nil` to return NIL instead, as `load_dotenv()` does.
 

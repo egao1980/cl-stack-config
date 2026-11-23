@@ -254,9 +254,10 @@ skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
 (defun load-dotenv (&optional (path #p".env") &key override (expand t)
                                                     (if-does-not-exist :error))
   "Set the process environment from the .env file PATH, like python-dotenv's
-   load_dotenv. A variable that is already set (even to \"\") is kept unless
-   OVERRIDE; ${NAME} expansion then also prefers the environment. Bare NAME
-   lines set nothing. Returns the ((NAME . VALUE) ...) that were set."
+   load_dotenv. A variable that is already set (on POSIX even to \"\"; on
+   Windows an empty variable does not exist) is kept unless OVERRIDE; without
+   OVERRIDE, ${NAME} expansion also prefers the environment. Bare NAME lines
+   set nothing. Returns the ((NAME . VALUE) ...) that were set."
   (let ((set '()))
     (dolist (pair (read-dotenv path :expand expand :override override
                                     :if-does-not-exist if-does-not-exist))

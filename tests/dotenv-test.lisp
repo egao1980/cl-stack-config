@@ -201,19 +201,20 @@ PYCL_FROM_ENV=${PYCL_OUTER}
   (ok (signals (cfg:parse-dotenv "=x" :environ '()) 'cfg:dotenv-syntax-warning)))
 
 (deftest dotenv-read-and-load-files
-  (let ((path (%write-utf8 (format nil "~CPYCL_BOM_8D=1~%PYCL_BARE_8D~%PYCL_EMPTY_SET_8D=from-file~%"
-                                  (code-char #xFEFF))
-                          "env"))
+  (let ((path (%write-utf8 (format nil "~CPYCL_BOM_8D=1~%PYCL_BARE_8D~%PYCL_SET_8D=from-file~%"
+                                   (code-char #xFEFF))
+                           "env"))
         (missing (merge-pathnames "no-such-dir-8d/.env" (uiop:temporary-directory))))
     (unwind-protect
         (progn
-          (ok (equal '(("PYCL_BOM_8D" . "1") ("PYCL_BARE_8D") ("PYCL_EMPTY_SET_8D" . "from-file"))
+          (ok (equal '(("PYCL_BOM_8D" . "1") ("PYCL_BARE_8D") ("PYCL_SET_8D" . "from-file"))
                      (cfg:read-dotenv path))
               "UTF-8 BOM dropped")
-          (setf (uiop:getenv "PYCL_EMPTY_SET_8D") "")
+          ;; Not "": on Windows an empty value unsets the variable.
+          (setf (uiop:getenv "PYCL_SET_8D") "outer")
           (ok (equal '(("PYCL_BOM_8D" . "1")) (cfg:load-dotenv path))
-              "returns what it set; bare names and set (even empty) variables are kept")
-          (ok (equal "" (uiop:getenv "PYCL_EMPTY_SET_8D")))
+              "returns what it set; bare names and set variables are kept")
+          (ok (equal "outer" (uiop:getenv "PYCL_SET_8D")))
           (ok (null (uiop:getenv "PYCL_BARE_8D")))
           (ok (null (cfg:load-dotenv missing :if-does-not-exist nil)))
           (ok (signals (cfg:load-dotenv missing) 'cfg:config-file-error))
@@ -221,7 +222,7 @@ PYCL_FROM_ENV=${PYCL_OUTER}
                       (cfg:load-dotenv missing)))
               "CONTINUE skips a missing file"))
       (setf (uiop:getenv "PYCL_BOM_8D") ""
-            (uiop:getenv "PYCL_EMPTY_SET_8D") "")
+            (uiop:getenv "PYCL_SET_8D") "")
       (uiop:delete-file-if-exists path))))
 
 (deftest dotenv-layer-expansion-missing-and-reload
