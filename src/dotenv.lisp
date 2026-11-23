@@ -220,26 +220,48 @@ skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
                 (push (cons name value) values))))))
     (nreverse values)))
 
+(defun %universal-newlines (text)
+  "TEXT with CRLF and lone CR line ends turned into LF, as Python's text
+   mode reads a file: python-dotenv opens a .env path that way, so a CRLF
+   checkout gives the same values (a multi-line quoted value has no CR) and
+   a CR-only file has one statement per line. TEXT itself when it has no
+   CR."
+  (declare (type string text))
+  (if (not (find #\Return text))
+      text
+      (let ((n (length text))
+            (i 0))
+        (with-output-to-string (out)
+          (loop while (< i n)
+                do (let ((c (char text i)))
+                     (incf i)
+                     (cond ((char/= c #\Return) (write-char c out))
+                           (t (write-char #\Newline out)
+                              (when (and (< i n) (char= (char text i) #\Newline))
+                                (incf i))))))))))
+
 (defun %read-dotenv-file (path if-does-not-exist)
-  "Text of the .env file PATH (UTF-8, BOM dropped). A missing file signals
-   CONFIG-FILE-ERROR with a CONTINUE restart (=> NIL) when IF-DOES-NOT-EXIST
-   is :ERROR; NIL returns NIL."
+  "Text of the .env file PATH (UTF-8, BOM dropped, line ends read as by
+   %UNIVERSAL-NEWLINES). A missing file signals CONFIG-FILE-ERROR with a
+   CONTINUE restart (=> NIL) when IF-DOES-NOT-EXIST is :ERROR; NIL returns
+   NIL."
   (let ((file (probe-file path)))
     (cond
-      (file
-       (let ((text (uiop:read-file-string file :external-format :utf-8)))
+     (file
+      (let ((text (uiop:read-file-string file :external-format :utf-8)))
+        (%universal-newlines
          (if (and (plusp (length text)) (char= (char text 0) (code-char #xFEFF)))
              (subseq text 1)
-             text)))
-      ((null if-does-not-exist) nil)
-      (t
-       (restart-case
-           (error 'config-file-error
-                  :message (format nil "missing .env file ~a" path)
-                  :path (namestring path))
-         (continue ()
-           :report "Skip the missing .env file"
-           nil))))))
+             text))))
+     ((null if-does-not-exist) nil)
+     (t
+      (restart-case
+          (error 'config-file-error
+                 :message (format nil "missing .env file ~a" path)
+                 :path (namestring path))
+        (continue ()
+          :report "Skip the missing .env file"
+          nil))))))
 
 (defun read-dotenv (path &rest keys &key environ expand override (if-does-not-exist :error))
   "PARSE-DOTENV of the file PATH; NIL when it is missing and

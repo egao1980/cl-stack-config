@@ -276,3 +276,21 @@ PYCL_FROM_ENV=${PYCL_OUTER}
                 (format nil "CR-only file, char codes: ~s" (codes got-cr))))
         (uiop:delete-file-if-exists crlf)
         (uiop:delete-file-if-exists cr)))))
+
+(deftest dotenv-newline-edge-cases
+  "python-dotenv 1.1.1 parity: a file with mixed CR, CRLF and LF ends reads
+   each as LF; an escaped \\r\\n in double quotes is still CR LF; a string
+   (like dotenv_values(stream=StringIO(...))) keeps its CRs."
+  (let ((mixed (%write-utf8 (format nil "A=1~C~CB=\"x~Cy\"~%~CC=3~CD=\"esc\\r\\n\""
+                                    #\Return #\Return #\Return #\Return #\Return)
+                            "env")))
+    (unwind-protect
+        (ok (equal `(("A" . "1") ("B" . ,(format nil "x~%y")) ("C" . "3")
+                     ("D" . ,(format nil "esc~C~C" #\Return #\Newline)))
+                   (cfg:read-dotenv mixed :environ '()))
+            "mixed line ends in a file")
+      (uiop:delete-file-if-exists mixed)))
+  (ok (equal `(("A" . ,(format nil "l1~C~%l2" #\Return)))
+             (cfg:parse-dotenv (format nil "A=\"l1~C~%l2\"~C~%" #\Return #\Return)
+                               :environ '()))
+      "parse-dotenv of a string keeps CR inside quotes"))
