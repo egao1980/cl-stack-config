@@ -248,3 +248,31 @@ PYCL_FROM_ENV=${PYCL_OUTER}
             (ok (equal "file" (cfg:get c "name")) "CONTINUE skips the layer")))
       (uiop:delete-file-if-exists toml)
       (uiop:delete-file-if-exists dotenv))))
+
+(deftest dotenv-files-read-with-universal-newlines
+  "evidence (PR #9): python-dotenv opens a .env file in text mode, so CRLF
+   (Windows, git autocrlf) and CR-only line ends read as LF. python-dotenv
+   1.1.1 dotenv_values(path) / load_dotenv(path) on these files:
+     CRLF: {A: \"line1\\nline2\", B: \"x\", C: \"s1\\ns2\"}
+     CR:   {A: \"1\", B: \"2\"}
+   read-dotenv keeps the CR inside multi-line quoted values (a PEM key in
+   .env gets CRs) and reads a CR-only file as one line: A = \"1\\rB=2\"."
+  (let ((crlf (%write-utf8 (format nil "A=\"line1~C~%line2\"~C~%B=x~C~%C='s1~C~%s2'~C~%"
+                                   #\Return #\Return #\Return #\Return #\Return)
+                           "env"))
+        (cr (%write-utf8 (format nil "A=1~CB=2~C" #\Return #\Return) "env")))
+    (flet ((codes (alist)
+             (mapcar (lambda (pair)
+                       (cons (car pair) (and (cdr pair) (map 'list #'char-code (cdr pair)))))
+                     alist)))
+      (unwind-protect
+          (let ((got-crlf (cfg:read-dotenv crlf :environ '()))
+                (got-cr (cfg:read-dotenv cr :environ '())))
+            (ok (equal `(("A" . ,(format nil "line1~%line2")) ("B" . "x")
+                         ("C" . ,(format nil "s1~%s2")))
+                       got-crlf)
+                (format nil "CRLF file, char codes: ~s" (codes got-crlf)))
+            (ok (equal '(("A" . "1") ("B" . "2")) got-cr)
+                (format nil "CR-only file, char codes: ~s" (codes got-cr))))
+        (uiop:delete-file-if-exists crlf)
+        (uiop:delete-file-if-exists cr)))))
