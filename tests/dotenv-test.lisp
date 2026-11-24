@@ -457,3 +457,44 @@ PYCL_FROM_ENV=${PYCL_OUTER}
         (format nil "~d cases equal python-dotenv 1.1.1~@[; ~d differ, first: ~s~]"
                 (length cases) (and failures (length failures))
                 (car (last failures))))))
+
+(deftest dotenv-undecodable-file-signals-config-error
+  "evidence (PR #9, round 3): a .env file that is not UTF-8 (a Latin-1
+   \"APP_NAME=caf\\xe9\" saved by an old editor; python-dotenv raises
+   UnicodeDecodeError) leaks SBCL's internal SB-INT:STREAM-DECODING-ERROR
+   from READ-DOTENV, LOAD-DOTENV and LOAD-CONFIG :DOTENV, so
+   (handler-case ... (config-error ...)) does not catch it. The TOML file
+   of the same LOAD-CONFIG call, with the same byte, signals
+   CONFIG-PARSE-ERROR naming its path."
+  (flet ((write-octets (octets type)
+           (uiop:with-temporary-file (:pathname path :prefix "cl-stack-config-" :type type
+                                      :keep t)
+             (with-open-file (out path :direction :output :if-exists :supersede
+                                       :element-type '(unsigned-byte 8))
+               (write-sequence (coerce octets '(vector (unsigned-byte 8))) out))
+             path))
+         (condition-of (thunk)
+           (handler-case (progn (funcall thunk) nil)
+             (error (e) e))))
+    (let* ((latin1 (append (map 'list #'char-code "APP_NAME=caf") '(#xe9 10)))
+           (env (write-octets latin1 "env"))
+           (toml (write-octets (append (map 'list #'char-code "[db]
+host = \"caf") '(#xe9) (map 'list #'char-code "\"
+")) "toml"))
+           (good-toml (%write-tmp "[db]
+host = \"x\"
+" "toml")))
+      (unwind-protect
+          (progn
+            (let ((c (condition-of (lambda () (cfg:load-config toml :environ '())))))
+              (ok (typep c 'cfg:config-parse-error)
+                  (format nil "control: Latin-1 TOML => ~s" (type-of c))))
+            (dolist (call (list (cons "read-dotenv" (lambda () (cfg:read-dotenv env :environ '())))
+                                (cons "load-dotenv" (lambda () (cfg:load-dotenv env)))
+                                (cons "load-config :dotenv"
+                                      (lambda () (cfg:load-config good-toml :dotenv env
+                                                                            :environ '())))))
+              (let ((c (condition-of (cdr call))))
+                (ok (typep c 'cfg:config-error)
+                    (format nil "~a of a Latin-1 .env => ~s" (car call) (type-of c))))))
+        (mapc #'uiop:delete-file-if-exists (list env toml good-toml))))))
