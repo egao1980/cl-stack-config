@@ -294,3 +294,58 @@ PYCL_FROM_ENV=${PYCL_OUTER}
              (cfg:parse-dotenv (format nil "A=\"l1~C~%l2\"~C~%" #\Return #\Return)
                                :environ '()))
       "parse-dotenv of a string keeps CR inside quotes"))
+
+(deftest dotenv-string-line-ends-and-unicode-blanks
+  "evidence (PR #9, round 2): python-dotenv's own grammar, not only Python's
+   text mode, ends a line at CR (_end_of_line, _unquoted_value [^\\r\\n]*) and
+   counts every Unicode blank of Python's \\s (VT, NBSP, ...) as a blank. The
+   README says parse-dotenv takes a string like dotenv_values(stream=...).
+   python-dotenv 1.1.1 dotenv_values(stream=io.StringIO(text)):
+     'A=1\\rB=2\\r'         {A: '1', B: '2'}
+     \"A='x'\\rB=2\\r\"       {A: 'x', B: '2'}
+     'A=\"x\"\\rB=2\\r'       {A: 'x', B: '2'}
+     '# c\\rA=1\\r'         {A: '1'}
+     'A=foo\\xa0\\n'        {A: 'foo'}
+     'A=x\\xa0# c\\n'       {A: 'x'}
+     'A=x\\x0b# c\\n'       {A: 'x'}
+     'A\\xa0=1\\n'          {A: '1'}
+     'export\\xa0A=1\\n'    {A: '1'}"
+  (let ((cr (code-char 13))
+        (nbsp (code-char #xa0))
+        (vt (code-char 11)))
+    (dolist (row (list (list "CR-only string, unquoted"
+                             (format nil "A=1~cB=2~c" cr cr)
+                             '(("A" . "1") ("B" . "2")))
+                       (list "CR-only string, single quotes"
+                             (format nil "A='x'~cB=2~c" cr cr)
+                             '(("A" . "x") ("B" . "2")))
+                       (list "CR-only string, double quotes"
+                             (format nil "A=\"x\"~cB=2~c" cr cr)
+                             '(("A" . "x") ("B" . "2")))
+                       (list "CR-only string, comment line"
+                             (format nil "# c~cA=1~c" cr cr)
+                             '(("A" . "1")))
+                       (list "trailing NBSP is trimmed"
+                             (format nil "A=foo~c~%" nbsp)
+                             '(("A" . "foo")))
+                       (list "NBSP before # starts a comment"
+                             (format nil "A=x~c# c~%" nbsp)
+                             '(("A" . "x")))
+                       (list "VT before # starts a comment"
+                             (format nil "A=x~c# c~%" vt)
+                             '(("A" . "x")))
+                       (list "NBSP ends a key"
+                             (format nil "A~c=1~%" nbsp)
+                             '(("A" . "1")))
+                       (list "NBSP after export"
+                             (format nil "export~cA=1~%" nbsp)
+                             '(("A" . "1")))))
+      (destructuring-bind (label text expected) row
+        (let ((got (%parse-quietly text)))
+          (ok (equal expected got)
+              (format nil "~a: ~s" label
+                      (mapcar (lambda (pair)
+                                (cons (map 'list #'char-code (car pair))
+                                      (and (cdr pair)
+                                           (map 'list #'char-code (cdr pair)))))
+                              got))))))))
