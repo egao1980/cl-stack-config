@@ -325,16 +325,24 @@ skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
    CONTINUE restart (=> NIL) when IF-DOES-NOT-EXIST is :ERROR; NIL returns
    NIL. A file that cannot be read signals CONFIG-FILE-ERROR, and one that is
    not UTF-8 (python-dotenv: UnicodeDecodeError) CONFIG-PARSE-ERROR, both
-   naming PATH, so the implementation's stream condition does not leak."
+   naming PATH. The octets are decoded by encoding-protocol's strict UTF-8
+   decoder, not by the implementation's stream: SBCL signals its own
+   condition, and ECL drops a sequence cut short at the end of the file."
   (let ((file (probe-file path)))
     (cond
      (file
-      (let ((text (handler-case (uiop:read-file-string file :external-format :utf-8)
+      (let ((text (handler-case
+                      (encoding-protocol:decode
+                       (with-open-file (in file :element-type '(unsigned-byte 8))
+                         (let ((octets (make-array (file-length in)
+                                                   :element-type '(unsigned-byte 8))))
+                           (subseq octets 0 (read-sequence octets in))))
+                       :encoding :utf-8 :strict t)
                     (file-error (e)
                       (error 'config-file-error
                              :message (format nil "cannot read .env file: ~a" e)
                              :path (namestring path)))
-                    (error (e)
+                    (encoding-protocol:encoding-error (e)
                       (error 'config-parse-error
                              :message (format nil ".env file is not UTF-8: ~a" e)
                              :path (namestring path))))))

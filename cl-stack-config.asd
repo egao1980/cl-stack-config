@@ -4,7 +4,9 @@
   :author "egao1980"
   :license "MIT"
   :depends-on ("toml-protocol" "toml-backend-tomlet" "uiop"
-               (:version "schema-protocol" "0.2.2"))
+               (:version "schema-protocol" "0.2.2")
+               ;; .env files are decoded by its strict UTF-8 decoder.
+               (:version "encoding-protocol" "0.3.0"))
 
   :serial t
   :pathname "src"
