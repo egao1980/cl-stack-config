@@ -323,11 +323,21 @@ skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
   "Text of the .env file PATH (UTF-8, BOM dropped, line ends read as by
    %UNIVERSAL-NEWLINES). A missing file signals CONFIG-FILE-ERROR with a
    CONTINUE restart (=> NIL) when IF-DOES-NOT-EXIST is :ERROR; NIL returns
-   NIL."
+   NIL. A file that cannot be read signals CONFIG-FILE-ERROR, and one that is
+   not UTF-8 (python-dotenv: UnicodeDecodeError) CONFIG-PARSE-ERROR, both
+   naming PATH, so the implementation's stream condition does not leak."
   (let ((file (probe-file path)))
     (cond
      (file
-      (let ((text (uiop:read-file-string file :external-format :utf-8)))
+      (let ((text (handler-case (uiop:read-file-string file :external-format :utf-8)
+                    (file-error (e)
+                      (error 'config-file-error
+                             :message (format nil "cannot read .env file: ~a" e)
+                             :path (namestring path)))
+                    (error (e)
+                      (error 'config-parse-error
+                             :message (format nil ".env file is not UTF-8: ~a" e)
+                             :path (namestring path))))))
         (%universal-newlines
          (if (and (plusp (length text)) (char= (char text 0) (code-char #xFEFF)))
              (subseq text 1)

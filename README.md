@@ -49,6 +49,7 @@ APP_FLAG                             # no "=": parsed with value NIL, never set
 - `load-dotenv` keeps variables that are already set (on POSIX even to `""`; Windows has no empty variables) unless `:override t`. It returns the `(name . value)` pairs it set.
 - A statement that does not parse signals `dotenv-syntax-warning` (with `dotenv-syntax-warning-line`) and is skipped, as python-dotenv logs and skips. `muffle-warning` silences it; a handler can turn it into an error.
 - A missing file signals `config-file-error` with a `continue` restart that skips it. `load-dotenv` / `read-dotenv` take `:if-does-not-exist nil` to return NIL instead, as `load_dotenv()` does.
+- A file that is not UTF-8 signals `config-parse-error` naming the path (python-dotenv: `UnicodeDecodeError`); one that cannot be read signals `config-file-error`.
 
 Deliberate differences from python-dotenv 1.1:
 
