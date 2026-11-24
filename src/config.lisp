@@ -166,47 +166,204 @@
            :ini
            :toml)))))
 
-(defun %parse-ini-value (raw)
-  (let ((s (string-trim '(#\Space #\Tab) raw)))
-    (if (and (>= (length s) 2)
-             (or (and (char= (char s 0) #\") (char= (char s (1- (length s))) #\"))
-                 (and (char= (char s 0) #\') (char= (char s (1- (length s))) #\'))))
-        (subseq s 1 (1- (length s)))
-        s)))
+(defun %ini-strip (string &optional (start 0) (end (length string)))
+  "STRING from START to END without the leading and trailing whitespace of
+   Python's str.strip() (%DOTENV-SPACE-P: NBSP, U+3000 and the other
+   Unicode blanks included)."
+  (declare (type string string))
+  (let* ((from (or (position-if-not #'%dotenv-space-p string :start start :end end) end))
+         (to (position-if-not #'%dotenv-space-p string :start from :end end :from-end t)))
+    (if to (subseq string from (1+ to)) "")))
 
-(defun parse-ini (text &optional path)
-  "Parse INI TEXT → nested equal hash-table. No interpolation.
-   [section] keys nest; keys before the first section stay at the root."
-  (let* ((root (make-hash-table :test #'equal))
+(defun %ini-prefix-at-p (prefix string start)
+  "PREFIX occurs in STRING at START."
+  (let ((end (+ start (length prefix))))
+    (and (<= end (length string))
+         (string= prefix string :start2 start :end2 end))))
+
+(defun %ini-clean (line inline-prefixes)
+  "configparser's _Line.clean of LINE, as (values CLEAN STRIPPED). CLEAN is
+   \"\" for a comment line (STRIPPED, LINE without its blanks, starts with #
+   or ;); else LINE cut at the first of INLINE-PREFIXES that starts it or
+   follows whitespace, then stripped. A blank line, not a comment, has
+   CLEAN = STRIPPED = \"\"."
+  (declare (type string line))
+  (let ((stripped (%ini-strip line)))
+    (values
+     (if (or (%ini-prefix-at-p "#" stripped 0) (%ini-prefix-at-p ";" stripped 0))
+         ""
+         (%ini-strip line 0
+                     (or (and inline-prefixes
+                              (loop for i from 0 below (length line)
+                                    when (and (or (zerop i) (%dotenv-space-p (char line (1- i))))
+                                              (some (lambda (prefix) (%ini-prefix-at-p prefix line i))
+                                                    inline-prefixes))
+                                      return i))
+                         (length line))))
+     stripped)))
+
+(defun %ini-header (clean)
+  "The section name of the header line CLEAN, else NIL. configparser's
+   \\[(?P<header>.+)\\] matched at the start: the name runs to the last ]
+   (at least one character) and is kept as written, case and blanks."
+  (declare (type string clean))
+  (when (and (plusp (length clean)) (char= #\[ (char clean 0)))
+    (let ((close (position #\] clean :from-end t)))
+      (when (and close (>= close 2))
+        (subseq clean 1 close)))))
+
+(defun %ini-lowercase (name)
+  "Python's str.lower() of NAME, configparser's optionxform. SBCL has
+   Unicode's full lowercase mapping (sb-unicode:lowercase: İ is i + U+0307,
+   a final Σ is ς), which equals str.lower() on every code point; elsewhere
+   STRING-DOWNCASE, the simple mapping, leaves the few letters without a
+   one-to-one lowercase (İ, ẞ, the Kelvin sign, a final Σ) apart."
+  (declare (type string name))
+  #+sbcl (sb-unicode:lowercase name)
+  #-sbcl (string-downcase name))
+
+(defun %ini-unquote (value)
+  "VALUE without one pair of enclosing double or single quotes."
+  (declare (type string value))
+  (let ((n (length value)))
+    (if (and (>= n 2)
+             (member (char value 0) '(#\" #\'))
+             (char= (char value 0) (char value (1- n))))
+        (subseq value 1 (1- n))
+        value)))
+
+(defun parse-ini (text &optional path
+                       &key inline-comments (key-case :downcase) (strict t)
+                       (default-section "DEFAULT") strip-quotes)
+  "Parse INI TEXT into a nested EQUAL hash-table the way Python's
+   configparser.RawConfigParser() reads a file with its defaults, as
+   botocore reads ~/.aws/credentials and ~/.aws/config:
+
+   - A line whose text starts with # or ; (after any indentation) is a
+     comment. There are no inline comments: k = a#b ;c is \"a#b ;c\".
+   - [NAME] starts a section. NAME runs to the last ] and is kept as
+     written, case and blanks.
+   - NAME = VALUE or NAME: VALUE is split at the first = or :. NAME is
+     lowercased (str.lower()), both are stripped, quotes stay, nothing is
+     interpolated.
+   - A line indented deeper than its option continues the value, joined
+     with newlines. Blank lines inside stay, trailing ones go, comment lines
+     are skipped.
+   - Every section gets the options of [DEFAULT] it lacks; the DEFAULT
+     table is there too.
+   - A repeated section or option, an empty name, or a line that is neither
+     a header nor an option signals CONFIG-PARSE-ERROR.
+
+   Lines end at LF, CRLF or CR; whitespace is Python's (NBSP, U+3000, ...).
+   Unlike configparser, keys before the first section stay at the root
+   (MissingSectionHeaderError there) without [DEFAULT]'s options, and a
+   leading BOM is dropped. PATH names the source in errors; pass NIL before
+   the keywords when there is none. The keywords are configparser's options:
+
+   INLINE-COMMENTS  T for # and ;, or a list of prefixes: a prefix at the
+                    start of a line or after whitespace starts a comment
+                    (inline_comment_prefixes).
+   KEY-CASE         :PRESERVE keeps option names as written (optionxform = str).
+   STRICT           NIL: a repeated section merges, a repeated option's last
+                    value wins.
+   DEFAULT-SECTION  the section every section inherits from; NIL for none.
+   STRIP-QUOTES     T drops one pair of enclosing quotes from each value, as
+                    parse-ini did before 0.3.1."
+  (declare (type string text))
+  (check-type key-case (member :downcase :preserve))
+  (check-type inline-comments (or boolean cons))
+  (check-type default-section (or null string))
+  (let* ((inline (if (eq inline-comments t) '("#" ";") inline-comments))
+         (root (make-hash-table :test #'equal))
          (current root)
+         (defaults nil)
+         ;; Sections and (section . option) pairs seen, for STRICT; the root
+         ;; is :ROOT.
+         (seen (make-hash-table :test #'equal))
+         (section :root)
+         (option nil)
+         (indent-level 0)
          (line-no 0))
-    (labels ((fail (msg)
+    (labels ((fail (control &rest args)
                (error 'config-parse-error
-                      :message (format nil "~a (line ~d)" msg line-no)
-                      :path path)))
-      (loop for line in (uiop:split-string text :separator '(#\Newline))
-            do (incf line-no)
-               (let* ((cut (or (position #\# line) (position #\; line)))
-                      (s (string-trim '(#\Space #\Tab #\Return)
-                                      (if cut (subseq line 0 cut) line))))
-                 (cond
-                   ((zerop (length s)))
-                   ((and (char= (char s 0) #\[)
-                         (char= (char s (1- (length s))) #\]))
-                    (let ((name (string-trim '(#\Space #\Tab)
-                                             (subseq s 1 (1- (length s))))))
-                      (when (zerop (length name))
-                        (fail "empty section name"))
-                      (setf current (%ensure-table root name))))
-                   (t
-                    (let ((eq-pos (or (position #\= s) (position #\: s))))
-                      (unless eq-pos
-                        (fail (format nil "expected key=value: ~s" s)))
-                      (let ((key (string-trim '(#\Space #\Tab) (subseq s 0 eq-pos)))
-                            (val (%parse-ini-value (subseq s (1+ eq-pos)))))
-                        (when (zerop (length key))
-                          (fail "empty key"))
-                        (setf (gethash key current) val))))))))
+                      :message (format nil "~? (line ~d)" control args line-no)
+                      :path path))
+             (enter-section (name)
+               (let ((table (gethash name root)))
+                 (cond ((and default-section (string= name default-section))
+                        (setf current (or defaults
+                                          (setf defaults (make-hash-table :test #'equal)
+                                                (gethash name root) defaults))))
+                       ((hash-table-p table)
+                        (when strict
+                          (fail "duplicate section [~a]" name))
+                        (setf current table))
+                       (t
+                        (setf current (make-hash-table :test #'equal)
+                              (gethash name root) current))))
+               (setf section name
+                     option nil))
+             (add-option (clean)
+               (let ((delimiter (position-if (lambda (c) (or (char= c #\=) (char= c #\:)))
+                                             clean)))
+                 (unless delimiter
+                   (fail "expected name = value or name: value, got ~s" clean))
+                 (let ((name (%ini-strip clean 0 delimiter)))
+                   (when (zerop (length name))
+                     (fail "empty name in ~s" clean))
+                   (let* ((key (if (eq key-case :preserve) name (%ini-lowercase name)))
+                          (id (cons section key)))
+                     (when (and strict (gethash id seen))
+                       (fail "duplicate option ~a~:[ before the first section~; in [~:*~a]~]"
+                             key (and (stringp section) section)))
+                     (setf (gethash id seen) t
+                           option key
+                           ;; The value's lines, last first, until the end.
+                           (gethash key current) (list (%ini-strip clean (1+ delimiter))))))))
+             (join (table)
+               ;; '\n'.join(lines).rstrip(): a value whose first line is
+               ;; empty (botocore's nested "s3 =" block) keeps its newline.
+               (maphash (lambda (key lines)
+                          (when (listp lines)
+                            (let* ((joined (format nil "~{~a~^~%~}" (reverse lines)))
+                                   (end (position-if-not #'%dotenv-space-p joined :from-end t))
+                                   (value (subseq joined 0 (if end (1+ end) 0))))
+                              (setf (gethash key table)
+                                    (if strip-quotes (%ini-unquote value) value)))))
+                        table)))
+      (let ((text (if (and (plusp (length text)) (char= (char text 0) (code-char #xFEFF)))
+                      (subseq text 1)
+                      text)))
+        (dolist (line (uiop:split-string (%universal-newlines text) :separator '(#\Newline)))
+          (incf line-no)
+          (multiple-value-bind (clean stripped) (%ini-clean line inline)
+            (if (zerop (length clean))
+                ;; A blank line (not a comment) inside a value is part of it.
+                (when (and option (zerop (length stripped)))
+                  (push "" (gethash option current)))
+                (let ((indent (or (position-if-not #'%dotenv-space-p line) 0)))
+                  (if (and option (> indent indent-level))
+                      (push clean (gethash option current))
+                      (let ((header (%ini-header clean)))
+                        (setf indent-level indent)
+                        (if header
+                            (enter-section header)
+                            (add-option clean)))))))))
+      (join root)
+      (maphash (lambda (name table)
+                 (declare (ignore name))
+                 (when (hash-table-p table)
+                   (join table)))
+               root)
+      (when defaults
+        (maphash (lambda (name table)
+                   (declare (ignore name))
+                   (when (and (hash-table-p table) (not (eq table defaults)))
+                     (maphash (lambda (key value)
+                                (unless (nth-value 1 (gethash key table))
+                                  (setf (gethash key table) value)))
+                              defaults)))
+                 root)))
     root))
 
 (defun load-config (source &key (prefix "APP") (env t) overrides environ (format :auto)

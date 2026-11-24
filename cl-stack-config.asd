@@ -1,5 +1,5 @@
 (defsystem "cl-stack-config"
-  :version "0.3.0"
+  :version "0.3.1"
   :description "env + .env + TOML/INI config facade for cl-stack (toml-protocol), typed settings via schema-protocol"
   :author "egao1980"
   :license "MIT"
@@ -24,6 +24,7 @@
   :components ((:file "package")
                (:file "config-test")
                (:file "dotenv-test")
+               (:file "ini-test")
                (:file "settings-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)

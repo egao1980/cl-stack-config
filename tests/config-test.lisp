@@ -60,21 +60,27 @@ port = 1
     path))
 
 (deftest load-ini-and-get
+  "An .ini file is read as configparser reads it (cl-stack-config#10):
+   whole-line comments only, lowercased option names, quotes kept."
   (let* ((path (%write-tmp-ini "
 # comment
 debug = true
 
 [database]
 host = localhost
-port = 5432
-name = \"app db\"
+Port = 5432
+name = app db
+password = s3#cr;t
+quoted = \"app db\"
 "))
          (c (cfg:load-config path :env nil)))
     (ok (eq :ini (cfg:config-format c)))
     (ok (eq t (cfg:get-boolean c "debug")))
     (ok (string= "localhost" (cfg:get c "database.host")))
     (ok (= 5432 (cfg:get-integer c "database.port")))
-    (ok (string= "app db" (cfg:get-string c "database.name")))))
+    (ok (string= "app db" (cfg:get-string c "database.name")))
+    (ok (string= "s3#cr;t" (cfg:get-string c "database.password")))
+    (ok (string= "\"app db\"" (cfg:get-string c "database.quoted")))))
 
 (deftest load-ini-explicit-format
   (let* ((path (%write-tmp-toml "
