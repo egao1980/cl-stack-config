@@ -13,7 +13,8 @@
   (source nil)
   (prefix nil)
   (env-p t)
-  (format :toml))
+  (format :toml)
+  (dotenv nil))
 
 (defun %path-list (path)
   (cond
@@ -118,21 +119,28 @@
     (push (subseq string start len) parts)
     (nreverse parts)))
 
-(defun %apply-env (table prefix &optional environ)
-  "Overlay getenv keys PREFIX_* onto TABLE. Nesting via __."
+(defun %apply-variables (table prefix alist)
+  "Overlay the PREFIX_* entries of ALIST, ((NAME . VALUE) ...), onto TABLE.
+   Nesting via __. Entries with a NIL value (bare .env names) are skipped."
   (when (or (null prefix) (zerop (length prefix)))
-    (return-from %apply-env table))
+    (return-from %apply-variables table))
   (let* ((needle (concatenate 'string (string-upcase prefix) "_"))
          (nlen (length needle)))
-    (dolist (pair (%environ-alist environ))
+    (dolist (pair alist)
       (destructuring-bind (name . raw) pair
-        (when (and (> (length name) nlen)
+        (when (and raw
+                   (> (length name) nlen)
                    (string= name needle :end1 nlen))
           (let* ((rest (subseq name nlen))
                  (parts (mapcar #'string-downcase (%split-ddash rest)))
                  (path (format nil "~{~a~^.~}" parts)))
             (%set-path table path raw)))))
     table))
+
+(defun %apply-env (table prefix &optional environ)
+  "Overlay getenv keys PREFIX_* onto TABLE (ENVIRON: alist, else the process
+   environment). Nesting via __."
+  (%apply-variables table prefix (%environ-alist environ)))
 
 (defun %apply-overrides (table overrides)
   (cond
@@ -201,13 +209,18 @@
                         (setf (gethash key current) val))))))))
     root))
 
-(defun load-config (source &key (prefix "APP") (env t) overrides environ (format :auto))
+(defun load-config (source &key (prefix "APP") (env t) overrides environ (format :auto)
+                           dotenv)
   "Parse SOURCE (pathname/string) → CONFIG.
    FORMAT is :toml, :ini, or :auto (.ini/.cfg/.conf → ini, else toml).
-   Precedence: file < env (when ENV) < OVERRIDES.
-   ENVIRON — optional (NAME . VALUE) alist (required for env overlay off SBCL)."
+   DOTENV — a .env file (see PARSE-DOTENV) whose PREFIX_* names are a layer
+   above the file; the process environment is not changed. A missing one
+   signals CONFIG-FILE-ERROR with a CONTINUE restart that skips the layer.
+   Precedence: file < DOTENV < env (when ENV) < OVERRIDES.
+   ENVIRON — optional (NAME . VALUE) alist (required for env overlay off SBCL);
+   ${NAME} in DOTENV looks it up first, then earlier .env names."
   (let* ((path (uiop:ensure-pathname source :want-file t
-                                     :defaults *default-pathname-defaults*))
+                                            :defaults *default-pathname-defaults*))
          (fmt (%detect-format path format))
          (tree
           (handler-case
@@ -225,22 +238,28 @@
               (error 'config-parse-error
                      :message (format nil "~a" e)
                      :path (namestring path))))))
+    (when dotenv
+      (%apply-variables tree prefix
+                        (apply #'read-dotenv dotenv :override nil
+                               (and environ (list :environ environ)))))
     (when env
       (%apply-env tree prefix environ))
     (%apply-overrides tree overrides)
-    (%make-config :data tree :source path :prefix prefix :env-p env :format fmt)))
+    (%make-config :data tree :source path :prefix prefix :env-p env :format fmt
+                  :dotenv dotenv)))
 
 (defun load (source &rest keys &key &allow-other-keys)
   "Alias for LOAD-CONFIG (shadows CL:LOAD in this package)."
   (apply #'load-config source keys))
 
 (defun reload (cfg &key (env (config-env-p cfg)) overrides)
-  "Re-read CFG's source file; re-apply env/overrides."
+  "Re-read CFG's source file and .env layer; re-apply env/overrides."
   (load-config (config-source cfg)
                :prefix (config-prefix cfg)
                :env env
                :overrides overrides
-               :format (config-format cfg)))
+               :format (config-format cfg)
+               :dotenv (config-dotenv cfg)))
 
 (defmacro with-config ((cfg) &body body)
   `(let ((*config* ,cfg))
