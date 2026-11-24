@@ -9,11 +9,16 @@
 ;;;   NAME='single: literal, only \' and \\ escapes'
 ;;;   NAME                       ; no "=": parsed with value NIL, never set
 ;;;
-;;; Quoted values may span lines. A statement that does not parse signals
-;;; DOTENV-SYNTAX-WARNING and is skipped, as python-dotenv logs and skips.
-;;; Two deliberate differences from python-dotenv 1.1: single-quoted values
-;;; are not expanded (as in sh and docker compose), and in "NAME= # note"
-;;; the # starts a comment (python-dotenv returns "# note").
+;;; The grammar is python-dotenv 1.1's (dotenv/parser.py): a line ends at
+;;; LF, CR or CRLF, and a blank is any whitespace of Python's \s, NBSP and
+;;; the other Unicode blanks included. Quoted values may span lines. A
+;;; statement that does not parse signals DOTENV-SYNTAX-WARNING and is
+;;; skipped, as python-dotenv logs and skips. Deliberate differences from
+;;; python-dotenv 1.1 (README): single-quoted values are not expanded (as in
+;;; sh and docker compose); in "NAME= # note" the # starts a comment
+;;; (python-dotenv: "# note"); \\" ends a quoted value (python-dotenv reads
+;;; an escaped quote and runs on to the next quote); a file's UTF-8 BOM is
+;;; dropped (python-dotenv keeps it in the first name).
 
 (define-condition dotenv-syntax-warning (warning)
   ((path :initarg :path :reader dotenv-syntax-warning-path :initform nil)
@@ -25,8 +30,68 @@
   (:documentation "A .env statement that does not parse. The statement is
 skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
 
-(defun %dotenv-hspace-p (c)
-  (and c (member c '(#\Space #\Tab #\Return #\Page)) t))
+(defun %dotenv-space-p (c)
+  "C is whitespace in Python's sense (re's \\s, str.isspace()), which
+   python-dotenv's grammar uses: ASCII TAB LF VT FF CR, the separators
+   #x1C-#x1F, SPACE, NEL, NBSP and the other Unicode blanks (U+1680,
+   U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000)."
+  (and c
+       (let ((code (char-code c)))
+         (or (<= 9 code 13)
+             (<= #x1c code #x20)
+             (= code #x85)
+             (= code #xa0)
+             (= code #x1680)
+             (<= #x2000 code #x200a)
+             (= code #x2028)
+             (= code #x2029)
+             (= code #x202f)
+             (= code #x205f)
+             (= code #x3000)))))
+
+(defun %dotenv-eol-p (c)
+  "C ends a line in python-dotenv's grammar: LF or CR (CRLF is one end)."
+  (and c (member (char-code c) '(10 13)) t))
+
+(defun %dotenv-blank-p (c)
+  "C is whitespace that does not end a line: python-dotenv's [^\\S\\r\\n]."
+  (and (%dotenv-space-p c) (not (%dotenv-eol-p c))))
+
+(defun %dotenv-unquoted-value (part spaced)
+  "python-dotenv's parse_unquoted_value of PART (the rest of the line after
+   = and its blanks): cut at the first # that follows whitespace
+   (re.sub(r\"\\s+#.*\", \"\", part)), then trailing whitespace stripped
+   (rstrip()). SPACED: blanks came between = and PART; then a # at its start
+   is a comment too, so NAME= # note is \"\" (python-dotenv: \"# note\")."
+  (declare (type string part))
+  (when (and spaced (plusp (length part)) (char= #\# (char part 0)))
+    (return-from %dotenv-unquoted-value ""))
+  (let ((end (length part))
+        (run nil))
+    (loop for k from 0 below (length part)
+          for c = (char part k)
+          do (cond ((%dotenv-space-p c) (unless run (setf run k)))
+                   ((and run (char= c #\#)) (setf end run) (return))
+                   (t (setf run nil))))
+    (let ((last (position-if-not #'%dotenv-space-p part :end end :from-end t)))
+      (if last (subseq part 0 (1+ last)) ""))))
+
+(defun %dotenv-closing-quote (text open)
+  "Index in TEXT of the quote that closes the value opened at OPEN, or NIL.
+   A backslash pairs with the next character, so \\\" does not close it and
+   \\\\\" does (python-dotenv's regex takes that \\\" as an escaped quote and
+   reads on to the next quote: the documented difference). With no closing
+   quote before the end, the last quote after OPEN closes it, where
+   python-dotenv's regex backtracks to, so A=\"x\\\" is x\\."
+  (let ((quote (char text open))
+        (n (length text))
+        (j (1+ open)))
+    (loop while (< j n)
+          do (let ((c (char text j)))
+               (cond ((and (char= c #\\) (< (1+ j) n)) (incf j 2))
+                     ((char= c quote) (return-from %dotenv-closing-quote j))
+                     (t (incf j)))))
+    (position quote text :start (1+ open) :from-end t)))
 
 (defun %dotenv-unescape (raw kind)
   "Decode the escapes of a quoted value: KIND :double knows \\\\ \\' \\\" \\a
@@ -58,111 +123,122 @@ skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
                            (progn (write-char c out) (incf i))))))))))
 
 (defun %dotenv-statements (text path)
-  "Statements of TEXT as (NAME VALUE KIND) in file order. VALUE is decoded
-   but not expanded (NIL for a bare NAME); KIND is :single, :double,
-   :unquoted or NIL."
+  "Statements of TEXT as (NAME VALUE KIND) in file order, by python-dotenv
+   1.1's grammar (dotenv/parser.py): a line ends at LF, CR or CRLF, and
+   whitespace (%DOTENV-SPACE-P) is Python's, Unicode blanks included. VALUE
+   is decoded but not expanded (NIL for a bare NAME); KIND is :single,
+   :double, :unquoted or NIL. A statement that does not parse warns and is
+   skipped to the end of the line where it failed."
   (let ((i 0)
         (line 1)
         (n (length text))
         (out '()))
-    (labels ((peek (&optional (k 0))
-               (let ((j (+ i k)))
-                 (and (< j n) (char text j))))
+    (labels ((peek ()
+               (and (< i n) (char text i)))
              (advance ()
-               (when (char= #\Newline (char text i))
-                 (incf line))
-               (incf i))
-             (skip-hspace ()
-               (loop while (%dotenv-hspace-p (peek)) do (advance)))
+               ;; Lines as python-dotenv counts them: CRLF, LF and CR each end one.
+               (let ((c (char text i)))
+                 (incf i)
+                 (when (case (char-code c)
+                         (10 t)
+                         (13 (let ((next (peek)))
+                               (not (and next (= 10 (char-code next))))))
+                         (t nil))
+                   (incf line))))
+             (skip-while (predicate)
+               (loop while (funcall predicate (peek)) do (advance)))
              (skip-to-eol ()
-               (loop while (and (peek) (char/= #\Newline (peek))) do (advance)))
-             (end-of-statement ()
-               "Blanks, an optional comment, then a newline or the end: consumed, T."
-               (skip-hspace)
-               (when (eql #\# (peek))
-                 (skip-to-eol))
-               (cond ((null (peek)) t)
-                     ((char= #\Newline (peek)) (advance) t)
-                     (t nil)))
-             (skip-bad (start-line)
-               (warn 'dotenv-syntax-warning :path path :line start-line)
+               (skip-while (lambda (c) (and c (not (%dotenv-eol-p c))))))
+             (skip-line ()
+               "_rest_of_line: to the end of this line and past it."
                (skip-to-eol)
                (when (peek) (advance)))
-             (read-quoted (quote)
-               "At QUOTE: the raw text up to the closing quote (consumed), or NIL."
-               (advance)
-               (let ((start i))
-                 (loop
-                   (let ((c (peek)))
-                     (cond ((null c) (return nil))
-                           ((and (char= c #\\) (peek 1)) (advance) (advance))
-                           ((char= c quote)
-                            (return (prog1 (subseq text start i) (advance))))
-                           (t (advance)))))))
+             (end-of-line ()
+               "_comment and _end_of_line: blanks, an optional # comment, then a line
+                end or the end of TEXT, consumed: T; else NIL."
+               (skip-while #'%dotenv-blank-p)
+               (when (eql #\# (peek))
+                 (skip-to-eol))
+               (let ((c (peek)))
+                 (cond ((null c) t)
+                       ((%dotenv-eol-p c)
+                        (advance)
+                        (let ((next (peek)))
+                          (when (and next (= 13 (char-code c)) (= 10 (char-code next)))
+                            (advance)))
+                        t)
+                       (t nil))))
              (read-key ()
-               (if (eql #\' (peek))
-                   (read-quoted #\')
-                   (let ((start i))
-                     (loop while (and (peek)
-                                      (not (member (peek) '(#\= #\# #\Newline)))
-                                      (not (%dotenv-hspace-p (peek))))
-                           do (advance))
-                     (and (> i start) (subseq text start i)))))
-             (read-unquoted (after-space)
-               "Up to the end of the line; a # after whitespace (AFTER-SPACE: there was
-                some between = and the value) starts a comment."
-               (let ((start i))
-                 (loop for c = (peek)
-                       until (or (null c) (char= c #\Newline)
-                                 (and (char= c #\#) after-space))
-                       do (setf after-space (%dotenv-hspace-p c))
-                          (advance))
-                 (prog1 (string-right-trim '(#\Space #\Tab #\Return #\Page)
-                                           (subseq text start i))
-                   (skip-to-eol)
-                   (when (peek) (advance))))))
+               "_single_quoted_key / _unquoted_key: the key (consumed), :COMMENT at a
+                #, or NIL when there is none."
+               (let ((c (peek)))
+                 (cond ((eql c #\#) :comment)
+                       ((eql c #\')
+                        (let ((close (position #\' text :start (1+ i))))
+                          (when (and close (> close (1+ i)))
+                            (prog1 (subseq text (1+ i) close)
+                              (loop while (<= i close) do (advance))))))
+                       (t
+                        (let ((start i))
+                          (skip-while (lambda (c)
+                                        (and c (char/= c #\=) (char/= c #\#)
+                                             (not (%dotenv-space-p c)))))
+                          (and (> i start) (subseq text start i)))))))
+             (read-value ()
+               "After = and its blanks: (VALUE KIND), or NIL for an unterminated quote
+                (nothing consumed)."
+               (let ((c (peek)))
+                 (cond ((or (null c) (%dotenv-eol-p c))
+                        (list "" :unquoted))
+                       ((or (char= c #\') (char= c #\"))
+                        (let ((close (%dotenv-closing-quote text i))
+                              (kind (if (char= c #\') :single :double)))
+                          (when close
+                            (prog1 (list (%dotenv-unescape (subseq text (1+ i) close) kind)
+                                         kind)
+                              (loop while (<= i close) do (advance))))))
+                       (t
+                        (let ((start i))
+                          (skip-to-eol)
+                          (list (subseq text start i) :unquoted)))))))
       (loop
-        (loop (skip-hspace)
-              (cond ((eql #\Newline (peek)) (advance))
-                    ((eql #\# (peek)) (skip-to-eol))
-                    (t (return))))
+        (skip-while #'%dotenv-space-p)
         (unless (peek)
           (return))
         (let ((start-line line))
-          (when (and (< (+ i 6) n)
-                     (string= "export" text :start2 i :end2 (+ i 6))
-                     (%dotenv-hspace-p (peek 6)))
-            (incf i 6)
-            (skip-hspace))
-          (let ((name (read-key)))
-            (skip-hspace)
-            (cond
-              ((or (null name) (zerop (length name)))
-               (skip-bad start-line))
-              ((eql #\= (peek))
-               (advance)
-               (let ((spaced (%dotenv-hspace-p (peek))))
-                 (skip-hspace)
-                 (let* ((value-start i)
-                        (value-line line)
-                        (kind (case (peek) (#\' :single) (#\" :double) (t :unquoted)))
-                        (raw (if (eq kind :unquoted)
-                                 (read-unquoted spaced)
-                                 (read-quoted (peek)))))
-                   (cond
-                    ((eq kind :unquoted)
-                     (push (list name raw kind) out))
-                    ((and raw (end-of-statement))
-                     (push (list name (%dotenv-unescape raw kind) kind) out))
-                    (raw (skip-bad start-line))
-                    (t
-                     ;; Unterminated quote: skip this line only, not the file.
-                     (setf i value-start
-                           line value-line)
-                     (skip-bad start-line))))))
-              ((end-of-statement)
-               (push (list name nil nil) out))
-              (t (skip-bad start-line)))))))
+          (block statement
+            (flet ((bad ()
+                     (warn 'dotenv-syntax-warning :path path :line start-line)
+                     (skip-line)
+                     (return-from statement)))
+              (when (and (< (+ i 6) n)
+                         (string= "export" text :start2 i :end2 (+ i 6))
+                         (%dotenv-blank-p (char text (+ i 6))))
+                (incf i 6)
+                (skip-while #'%dotenv-blank-p))
+              (let ((name (read-key)))
+                (cond
+                 ((null name) (bad))
+                 ((eq name :comment) (end-of-line))
+                 (t
+                  (skip-while #'%dotenv-blank-p)
+                  (let ((statement
+                         (if (eql #\= (peek))
+                             (progn
+                               (advance)
+                               (let ((spaced (%dotenv-blank-p (peek))))
+                                 (skip-while #'%dotenv-blank-p)
+                                 (destructuring-bind (&optional value kind) (read-value)
+                                   (unless kind (bad))
+                                   (list name
+                                         (if (eq kind :unquoted)
+                                             (%dotenv-unquoted-value value spaced)
+                                             value)
+                                         kind))))
+                             (list name nil nil))))
+                    (if (end-of-line)
+                        (push statement out)
+                        (bad)))))))))))
     (nreverse out)))
 
 (defun %dotenv-expand (value lookup)
@@ -197,14 +273,17 @@ skipped; MUFFLE-WARNING silences it, a handler may also signal an error."))
    double-quoted values, looked up in the names parsed so far and in ENVIRON
    (an alist; default the process environment). OVERRIDE T (default, as
    python-dotenv's dotenv_values): earlier names win over ENVIRON; NIL (as
-   load_dotenv): ENVIRON wins. PATH only names the source in warnings."
+   load_dotenv): ENVIRON wins. A name parsed so far is defined even when it
+   is a bare NAME: it expands to \"\", not to its default (python-dotenv's
+   None). PATH only names the source in warnings."
   (let ((values '()))
     (flet ((env (name)
              (if environ-p
                  (cdr (assoc name environ :test #'string=))
                  (uiop:getenv name)))
            (file (name)
-             (cdr (assoc name values :test #'string=))))
+             (let ((cell (assoc name values :test #'string=)))
+               (and cell (or (cdr cell) "")))))
       (dolist (statement (%dotenv-statements text path))
         (destructuring-bind (name value kind) statement
           (let ((value (if (and expand value (not (eq kind :single)))

@@ -349,3 +349,111 @@ PYCL_FROM_ENV=${PYCL_OUTER}
                                       (and (cdr pair)
                                            (map 'list #'char-code (cdr pair)))))
                               got))))))))
+
+(deftest dotenv-grammar-edge-cases
+  "python-dotenv 1.1.1 dotenv_values(stream=io.StringIO(text)) on the
+   corners of its grammar: Unicode blanks between statements and as
+   separators, CR as a line end everywhere, a quote with no closing one
+   before the end (its regex backtracks to the last quote), a bare name that
+   defines a name for ${NAME:-d}."
+  (let ((nbsp (code-char #xa0))
+        (nel (code-char #x85))
+        (ls (code-char #x2028))
+        (fs (code-char #x1c))
+        (cr (code-char 13)))
+    (dolist (row (list (list "NEL before # starts a comment"
+                             (format nil "A=x~c# c~%B=2~%" nel)
+                             '(("A" . "x") ("B" . "2")))
+                       (list "U+2028 is a blank, not a line end"
+                             (format nil "A=1~cB=2~%" ls)
+                             `(("A" . ,(format nil "1~cB=2" ls))))
+                       (list "U+001C before # starts a comment"
+                             (format nil "A=x~c#c~%" fs)
+                             '(("A" . "x")))
+                       (list "blank-only lines and a leading NBSP"
+                             (format nil "~c~%~cA=1~%" nbsp nbsp)
+                             '(("A" . "1")))
+                       (list "CR, CR CR, LF CR line ends"
+                             (format nil "A=1~c~cB=2~%~cC=3" cr cr cr)
+                             '(("A" . "1") ("B" . "2") ("C" . "3")))
+                       (list "junk after a quoted value up to CR"
+                             (format nil "A=\"x\" j~cB=2~c" cr cr)
+                             '(("B" . "2")))
+                       (list "single-quoted value over a CR"
+                             (format nil "A='x~cy'~cB=2" cr cr)
+                             `(("A" . ,(format nil "x~cy" cr)) ("B" . "2")))
+                       (list "escaped quote and no other: the value ends there"
+                             (format nil "A=\"x\\\"~%B=2~%")
+                             '(("A" . "x\\") ("B" . "2")))
+                       (list "a single-quoted key may span lines; '' is no key"
+                             (format nil "'a~%b'=1~%''=2~%B=3~%")
+                             `((,(format nil "a~%b") . "1") ("B" . "3")))
+                       (list "quote characters inside an unquoted key"
+                             (format nil "A\"B=1~%")
+                             '(("A\"B" . "1")))
+                       (list "export alone, export #, export ="
+                             (format nil "export~%export #c~%export =1~%B=2~%")
+                             '(("export") ("B" . "2")))
+                       (list "a # right after a key ends a bare name"
+                             (format nil "A#c~%B=2~%")
+                             '(("A") ("B" . "2")))
+                       (list "a BOM in a string is part of the first name"
+                             (format nil "~cA=1~%" (code-char #xfeff))
+                             `((,(format nil "~cA" (code-char #xfeff)) . "1")))
+                       (list "a bare name expands to \"\", not to its default"
+                             (format nil "N~%X=${N:-d}~%Y=${A:-d}~%")
+                             '(("N") ("X" . "") ("Y" . "envA")))))
+      (destructuring-bind (label text expected) row
+        (let ((got (%parse-quietly text)))
+          (ok (equal expected got) (format nil "~a: ~s" label got))))))
+  (ok (equal '(("HOME") ("X" . ""))
+             (cfg:parse-dotenv (format nil "HOME~%X=${HOME:-d}~%") :override nil
+                                                                   :environ '()))
+      ":override nil: a bare name the environment lacks expands to \"\"")
+  (ok (equal '(("HOME") ("X" . "/h"))
+             (cfg:parse-dotenv (format nil "HOME~%X=${HOME:-d}~%") :override nil
+                                                                   :environ '(("HOME" . "/h"))))
+      ":override nil: the environment wins over a bare name"))
+
+(defun %dotenv-parity-cases ()
+  "The (EXPAND TEXT EXPECTED) cases of tests/dotenv-parity.sexp (or of the file
+   CL_STACK_CONFIG_DOTENV_PARITY names), with character codes made strings:
+   a pair there is (NAME-CODES (:s VALUE-CODES...)) or (NAME-CODES NIL)."
+  (let* ((env (uiop:getenv "CL_STACK_CONFIG_DOTENV_PARITY"))
+         (path (if (and env (plusp (length env)))
+                   (pathname env)
+                   (asdf:system-relative-pathname "cl-stack-config"
+                                                  "tests/dotenv-parity.sexp"))))
+    (flet ((text (codes) (map 'string #'code-char codes)))
+      (with-open-file (in path :external-format :utf-8)
+        (with-standard-io-syntax
+            (let ((*read-eval* nil))
+              (loop for form = (read in nil in)
+                    until (eq form in)
+                    when (eq :case (first form))
+                      collect (destructuring-bind (expand text pairs) (rest form)
+                                (list expand (text text)
+                                      (mapcar (lambda (pair)
+                                                (destructuring-bind (name value) pair
+                                                  (cons (text name)
+                                                        (and value (text (rest value))))))
+                                              pairs))))))))))
+
+(deftest dotenv-python-dotenv-random-parity
+  "Random .env texts (tests/dotenv-parity.py: LF / CR / CRLF ends, Unicode
+   blanks, quotes, backslashes, comments, export, ${...}) give what
+   python-dotenv 1.1.1's dotenv_values gives, with and without
+   interpolation; the documented differences are left out of the set."
+  (let ((cases (%dotenv-parity-cases))
+        (failures '()))
+    (dolist (case cases)
+      (destructuring-bind (expand text expected) case
+        (let ((got (%parse-quietly text :expand expand)))
+          (unless (equal expected got)
+            (push (list :text (map 'list #'char-code text) :expand expand
+                        :got got :expected expected)
+                  failures)))))
+    (ok (and (plusp (length cases)) (null failures))
+        (format nil "~d cases equal python-dotenv 1.1.1~@[; ~d differ, first: ~s~]"
+                (length cases) (and failures (length failures))
+                (car (last failures))))))
